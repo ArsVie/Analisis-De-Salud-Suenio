@@ -1,0 +1,310 @@
+---
+author: "Ruiz Espinoza Victor Angel"
+date: "2025-06-05"
+title: "Examen 4: Análisis de la relación entre salud y sueño"
+output: html_document
+---
+
+
+```{r,warning=FALSE,message=FALSE,include=FALSE}
+library(readxl)
+library(readr)
+library(dplyr)
+library(MVN)
+library(ggplot2)
+library(tidyr)
+library(lmtest)
+library(randomForest)
+library(DAAG)
+library(party)
+library(rpart)
+library(rpart.plot)
+library(mlbench)
+library(caret)
+library(biotools)
+library(MASS)
+library(pROC)
+library(tree)
+library(GGally) #pairplot
+library(patchwork)
+library(lawstat)
+```
+
+
+
+```{r}
+Sleep_health_and_lifestyle_dataset <- read_csv("~/Downloads/Health and Sleep relation 2024/Sleep_health_and_lifestyle_dataset.csv",show_col_types = F)
+colnames(Sleep_health_and_lifestyle_dataset)
+```
+# Preprocesamiento y limpieza de datos.
+```{r}
+Sleep_health_and_lifestyle_dataset$`BMI Category`<-recode(Sleep_health_and_lifestyle_dataset$`BMI Category`,
+  "Normal Weight" = "Normal")
+table(Sleep_health_and_lifestyle_dataset$`Sleep Disorder`)
+```
+
+```{r}
+# Cargar librerías necesarias
+library(caret)      # Para preprocesamiento y modelado
+library(visdat)     # Para visualización de datos faltantes
+library(corrplot)   # Para matriz de correlación
+
+sleep_data <- Sleep_health_and_lifestyle_dataset %>% dplyr::select(!c(`Person ID`))
+colnames(sleep_data) <- make.names(colnames(sleep_data))
+sleep_data$`Daily.Steps`<-sleep_data$`Daily.Steps`/1000 #Convertir pasos diarios a miles
+sleep_data$`Stress.Level`<- sleep_data$`Stress.Level`*10 #Convertir nivel de estrés a escala de 0 a 100
+#Conversión de variables categóricas a factores
+sleep_data <- sleep_data %>%
+  mutate(
+    Gender = as.factor(Gender),
+    Occupation = as.factor(Occupation),
+    `BMI.Category` = as.factor(`BMI.Category`),
+    `Sleep.Disorder` = as.factor(`Sleep.Disorder`)
+  )
+#Separación de presión sanguínea
+sleep_data <- sleep_data %>%
+  separate(`Blood.Pressure`, into = c("Systolic_BP", "Diastolic_BP"), sep = "/") %>%
+  mutate(
+    Systolic_BP = as.numeric(Systolic_BP),
+    Diastolic_BP = as.numeric(Diastolic_BP)
+  )
+
+```
+
+```{r}
+
+sleep_data$`Problemas.de.Sueño` <- as.factor(ifelse(sleep_data$`Sleep.Disorder` %in% c("Sleep Apnea","Insomnia"), "Yes", "No"))
+
+sleep_data_rel<- sleep_data %>%
+  dplyr::select(`Problemas.de.Sueño`, `Age`, `Gender`, `BMI.Category`, `Systolic_BP`, `Diastolic_BP`, `Stress.Level`,`Physical.Activity.Level`,`Heart.Rate`,`Daily.Steps`)
+```
+
+```{r}
+library(ggplot2)
+library(gridExtra)
+
+p2<-ggpairs(sleep_data_rel %>%  dplyr::select(!c(Problemas.de.Sueño)), aes(color=sleep_data_rel$Problemas.de.Sueño), progress = FALSE) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+numeric_vars <- sleep_data_rel[, sapply(sleep_data_rel, is.numeric)]
+p <- list()
+for (i in 1:ncol(numeric_vars)) {
+  var_name <- names(numeric_vars)[i]
+  var_data <- numeric_vars[[i]]
+  
+  p[[var_name]] <- ggplot(data.frame(x = var_data), aes(x = x)) +
+    geom_histogram(aes(y = ..density..), 
+                   fill = "skyblue", 
+                   color = "black",
+                   bins = nclass.scott(var_data)) +
+    geom_density(color = "blue4", size = 1) +
+    stat_function(fun = dnorm,
+                 args = list(mean = mean(var_data, na.rm = TRUE),
+                           sd = sd(var_data, na.rm = TRUE)),
+                 color = "red", size = 1) +
+    ggtitle(paste("Distribution of", var_name)) +
+    xlab(var_name) +
+    theme_minimal()
+}
+
+final_plot <- grid.arrange(grobs = p, ncol = 4)
+ggsave("all_variables_grid.png", plot = final_plot,width = 16, height = 6,dpi = 300)
+ggsave("pairplot.png", plot = p2, width = 18, height = 13.5, dpi = 300)
+```
+
+
+## Separacion de la base de datos en entrenamiento y prueba
+```{r}
+set.seed(123)
+train_index <- createDataPartition(sleep_data_rel$`Problemas.de.Sueño`, p = 0.8, list = FALSE)
+train_data <- sleep_data_rel[train_index, ]
+test_data <- sleep_data_rel[-train_index, ]
+```
+
+#Verificacion de normalidad y homogeneidad de varianzas
+```{r}
+vars <- names(sleep_data_rel)[5:10]
+sapply(vars, function(var) {
+  tapply(sleep_data_rel[[var]], sleep_data_rel$Problemas.de.Sueño, function(x) {
+    p <- shapiro.test(x)$p.value
+    if (p > 0.05) {
+      return(paste0("p = ", round(p, 4), " → Normal"))
+    } else {
+      return(paste0("p = ", round(p, 4), " → No normal"))
+    }
+  })
+})
+```
+```{r}
+#mvn(data = subset(train_data, `Problemas.de.Sueño` == "Yes")[6:10], mvn_test = "hz", multivariate_outlier_method = "quan")
+#mvn(data = subset(train_data, `Problemas.de.Sueño` == "No")[6:10], mvn_test = "hz", multivariate_outlier_method = "quan")
+```
+No los muestro porque no se cumplen los supuestos de normalidad, pero leyendo un poco sobre el tema entendi que si los datos son simetricos y la precision es alta, se puede seguir usando LDA
+
+
+```{r}
+car::leveneTest(Diastolic_BP~Problemas.de.Sueño,data=train_data)
+car::leveneTest(Systolic_BP~Problemas.de.Sueño,data=train_data)
+car::leveneTest(Stress.Level~Problemas.de.Sueño,data=train_data)
+car::leveneTest(Physical.Activity.Level~Problemas.de.Sueño,data=train_data)
+car::leveneTest(Heart.Rate~Problemas.de.Sueño,data=train_data)
+car::leveneTest(Daily.Steps~Problemas.de.Sueño,data=train_data)
+```
+
+## Modelo de regresión logística
+```{r}
+modelo_logit<-glm(data = train_data, `Problemas.de.Sueño`~ .,family= binomial(link = "logit"))
+
+summary(modelo_logit)
+```
+### Seleccion por pasos
+
+```{r}
+modelo_logit_step<- step(modelo_logit, direction = "both", trace = FALSE)
+summary(modelo_logit_step)
+```
+```{r}
+predicciones_logit <- predict(modelo_logit, newdata = test_data)
+conf_matrix_modelo_logit<-confusionMatrix(as.factor(ifelse(predicciones_logit > 0.5, "Yes", "No")), 
+                test_data$`Problemas.de.Sueño`, 
+                positive = "Yes"
+)
+```
+## Modelo LDA
+
+```{r}
+
+modelo_lda <- lda(`Problemas.de.Sueño` ~., data = train_data)
+lda_predictions <- predict(modelo_lda,test_data)
+print(modelo_lda)
+```
+
+```{r}
+conf_matrix_modelo_lda<-confusionMatrix(as.factor(ifelse(lda_predictions$posterior[,2] > 0.5, "Yes", "No")), 
+                test_data$`Problemas.de.Sueño`, 
+                positive = "Yes",
+                mode="everything")
+print(conf_matrix_modelo_lda)
+
+```
+
+## Modelo de Árbol de Decisión
+
+```{r}
+modelo_tree <- rpart(
+  formula = `Problemas.de.Sueño` ~ ., 
+  data = train_data,
+  method = "class",
+  control = rpart.control(
+    minsplit = 10,
+    minbucket = 5,
+  ))
+```
+
+```{r}
+png("decision_tree.png", width = 1200, height = 800, res = 150)
+rpart.plot(modelo_tree, 
+           type = 4, 
+           extra = 104,
+           box.palette = "GnBu",
+           branch.lty = 3, 
+           shadow.col = "gray",
+           nn = TRUE)
+dev.off()
+```
+```{r}
+predictions <- predict(modelo_tree, test_data, type = "class")
+
+conf_matrix_modelo_tree <- confusionMatrix(predictions, test_data$`Problemas.de.Sueño`,positive="Yes")
+print(conf_matrix_modelo_tree)
+
+importance <- varImp(modelo_tree)
+importancia_modelo_tree<-ggplot(importance, aes(x = reorder(rownames(importance), Overall), y = Overall)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Importancia de las Variables en el Modelo Arbol de Decision", x = "Variables", y = "Reducción Media en el Índice de Gini")
+```
+
+### Podado del árbol de decisión
+
+```{r}
+optimal_cp <- modelo_tree$cptable[
+  which.min(modelo_tree$cptable[, "xerror"]), "CP"]
+
+podado <- prune(modelo_tree, cp = optimal_cp)
+
+png("podado.png", width = 1200, height = 800, res = 150)
+rpart.plot(podado,
+           type = 4, 
+           extra = 104,
+           box.palette = "GnBu",
+           branch.lty = 3, 
+           shadow.col = "gray")
+dev.off()
+```
+
+
+```{r}
+predictions <- predict(podado, test_data, type = "class")
+
+
+conf_matrix_podado <- confusionMatrix(predictions, test_data$`Problemas.de.Sueño`)
+print(conf_matrix_podado)
+
+
+importance <- varImp(podado)
+importancia_modelo_podado<-ggplot(importance, aes(x = reorder(rownames(importance), Overall), y = Overall)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Importancia de las Variables en el Modelo Arbol de Decision (Podado)", x = "Variables", y = "Reducción Media en el Índice de Gini")
+```
+
+## Model de Random Forest
+
+
+```{r}
+rf_model <- randomForest(
+  `Problemas.de.Sueño` ~ .,
+  data = sleep_data_rel,
+  ntree = 500,       
+  importance = TRUE,  
+  strata = train_data$`Problemas.de.Sueño` 
+)
+
+print(rf_model)
+
+importance_scores <- importance(rf_model, type = 2)
+
+importance_df <- data.frame(
+  Feature = rownames(importance_scores),
+  Importance = importance_scores[, 1]
+) %>% arrange(desc(Importance))
+
+importancia_modelo_rf<-ggplot(importance_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Importancia de las Variables en el Modelo de Random Forest",
+       x = "Variables",
+       y = "Reducción Media en el Índice de Gini") +
+  theme_minimal()
+
+```
+```{r}
+conf_matrix_modelo_rf <- confusionMatrix(predict(rf_model, sleep_data_rel), sleep_data_rel$`Problemas.de.Sueño`, positive = "Yes")
+print(conf_matrix_modelo_rf)
+```
+```{r}
+colnames(sleep_data_rel)
+```
+
+```{r}
+importancia_modelo_tree
+importancia_modelo_rf
+importancia_modelo_podado
+
+ggsave("importancia_modelo_tree.png", importancia_modelo_tree, width = 10, height = 6, dpi = 300)
+ggsave("importancia_modelo_rf.png", importancia_modelo_rf, width = 10, height = 6, dpi = 300)
+ggsave("importancia_modelo_podado.png", importancia_modelo_podado, width = 10, height = 6, dpi = 300)
+
+```
