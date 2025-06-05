@@ -1,7 +1,7 @@
 ---
 author: "Ruiz Espinoza Victor Angel"
 date: "2025-06-05"
-title: "Examen 4: Análisis de la relación entre salud y sueño"
+title: "Análisis de la relación entre salud y sueño"
 output: html_document
 ---
 
